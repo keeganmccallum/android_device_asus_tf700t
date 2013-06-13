@@ -33,10 +33,12 @@ import android.os.Message;
 import android.os.Messenger;
 import android.os.RemoteException;
 import android.os.ServiceManager;
+import android.os.SystemProperties;
 import android.provider.Settings;
 import android.provider.Settings.SettingNotFoundException;
 import android.util.Log;
 import android.util.Slog;
+import android.view.KeyCharacterMap;
 import android.view.KeyEvent;
 
 import com.android.internal.os.DeviceKeyHandler;
@@ -50,7 +52,51 @@ public final class KeyHandler implements DeviceKeyHandler {
     private static final int MAXIMUM_BACKLIGHT = android.os.PowerManager.BRIGHTNESS_ON;
     private static final String SETTING_TOUCHPAD_STATUS = "touchpad_status";
 
+    public static final String PERMISSION_KEYPAD_RECEIVER =
+            "com.cyanogenmod.asusdec.permission.KEYPAD_RECEIVER";
+
+    public static final String ACTION_DOCK_KEYPAD_KEY_PRESSED =
+                                "com.cyanogenmod.asusdec.actions.ACTION_DOCK_KEYPAD_KEY_PRESSED";
+    public static final String EXTRA_ASUSDEC_KEY = "key";
+    public static final String EXTRA_ASUSDEC_STATUS = "status";
+    public static final String EXTRA_ASUSDEC_VALUE = "value";
+
+    public static final String META_FUNCTION_KEYS_PROPERTY = "sys.asusdec.kp.fk";
+
+    // Private asusdec keys values (for notification purpose)
+    public static final int ASUSDEC_UNKNOWN          = -1;
+    public static final int ASUSDEC_WIFI             =  1;
+    public static final int ASUSDEC_BT               =  2;
+    public static final int ASUSDEC_TOUCHPAD         =  3;
+    public static final int ASUSDEC_BRIGHTNESS       =  4;
+    public static final int ASUSDEC_VOLUME           =  5;
+    public static final int ASUSDEC_VOLUME_MUTE      =  6;
+    public static final int ASUSDEC_MEDIA            =  7;
+    public static final int ASUSDEC_SCREENSHOT       =  8;
+    public static final int ASUSDEC_EXPLORER         =  9;
+    public static final int ASUSDEC_SETTINGS         = 10;
+    public static final int ASUSDEC_CAPS_LOCK        = 11;
+
+    public static final int ASUSDEC_STATUS_OFF       =  0;
+    public static final int ASUSDEC_STATUS_ON        =  1;
+
+    public static final int ASUSDEC_MEDIA_PLAY_PAUSE =  0;
+    public static final int ASUSDEC_MEDIA_PREVIOUS   =  1;
+    public static final int ASUSDEC_MEDIA_NEXT       =  2;
+
     // Use specific scan codes from device instead of aosp keycodes
+    private static final int SCANCODE_F1     = 59;
+    private static final int SCANCODE_F2     = 60;
+    private static final int SCANCODE_F3     = 61;
+    private static final int SCANCODE_F4     = 62;
+    private static final int SCANCODE_F5     = 63;
+    private static final int SCANCODE_F6     = 64;
+    private static final int SCANCODE_F7     = 65;
+    private static final int SCANCODE_F8     = 66;
+    private static final int SCANCODE_F9     = 67;
+    private static final int SCANCODE_F10    = 68;
+    private static final int SCANCODE_F11    = 87;
+    private static final int SCANCODE_F12    = 88;
     private static final int SCANCODE_TOGGLE_WIFI     = 238;
     private static final int SCANCODE_TOGGLE_BT       = 237;
     private static final int SCANCODE_TOGGLE_TOUCHPAD =  60;  // KEYCODE_F2
@@ -65,6 +111,7 @@ public final class KeyHandler implements DeviceKeyHandler {
     private final Handler mHandler;
     private final Intent mSettingsIntent;
     private final boolean mAutomaticAvailable;
+    private boolean mDocked = false;
     private boolean mTouchpadEnabled = true;
     private WifiManager mWifiManager;
     private AudioManager mAudioManager;
@@ -169,7 +216,7 @@ public final class KeyHandler implements DeviceKeyHandler {
                 return false;
         }
 
-        return true;
+        return KEYEVENT_CAUGHT;
     }
 
     private void toggleWifi() {
@@ -256,6 +303,7 @@ public final class KeyHandler implements DeviceKeyHandler {
         if (!mAutomaticAvailable) {
             return;
         }
+        int value = getBrightness(MINIMUM_BACKLIGHT);
         int currentValue =
                 Settings.System.getInt(
                     mContext.getContentResolver(),
@@ -263,8 +311,12 @@ public final class KeyHandler implements DeviceKeyHandler {
                     Settings.System.SCREEN_BRIGHTNESS_MODE_MANUAL);
         setBrightnessMode(
                 currentValue == Settings.System.SCREEN_BRIGHTNESS_MODE_MANUAL ?
-                Settings.System.SCREEN_BRIGHTNESS_MODE_AUTOMATIC :
-                Settings.System.SCREEN_BRIGHTNESS_MODE_MANUAL);
+                                Settings.System.SCREEN_BRIGHTNESS_MODE_AUTOMATIC :
+                                Settings.System.SCREEN_BRIGHTNESS_MODE_MANUAL);
+        int status = currentValue == Settings.System.SCREEN_BRIGHTNESS_MODE_MANUAL ?
+                                    ASUSDEC_STATUS_ON :
+                                    ASUSDEC_STATUS_OFF;
+        notifyKey(ASUSDEC_BRIGHTNESS, status, value);
     }
 
     private void setBrightnessMode(int mode) {
@@ -296,9 +348,14 @@ public final class KeyHandler implements DeviceKeyHandler {
         return value;
     }
 
+    private void launchExplorer() {
+        notifyKey(ASUSDEC_EXPLORER, ASUSDEC_STATUS_OFF);
+    }
+
     private void launchSettings() {
         try {
             mContext.startActivity(mSettingsIntent);
+            notifyKey(ASUSDEC_SETTINGS, ASUSDEC_STATUS_OFF);
         } catch (ActivityNotFoundException ex) {
             Slog.e(TAG, "Could not launch settings intent", ex);
         }
@@ -320,7 +377,53 @@ public final class KeyHandler implements DeviceKeyHandler {
                     AudioManager.RINGER_MODE_NORMAL :
                     AudioManager.RINGER_MODE_SILENT;
             mAudioManager.setRingerMode(newValue);
+
+            int status = newValue == AudioManager.RINGER_MODE_NORMAL ?
+                    ASUSDEC_STATUS_OFF :
+                    ASUSDEC_STATUS_ON;
+            notifyKey(ASUSDEC_VOLUME_MUTE, status);
         }
+    }
+
+    private void volumeDown() {
+        if (mAudioManager == null) {
+            mAudioManager = (AudioManager)mContext.getSystemService(Context.AUDIO_SERVICE);
+        }
+        int value = mAudioManager.getStreamVolume(AudioManager.STREAM_SYSTEM);
+        int status = mAudioManager.getRingerMode() == AudioManager.RINGER_MODE_NORMAL ?
+                    ASUSDEC_STATUS_ON :
+                    ASUSDEC_STATUS_OFF;
+        notifyKey(ASUSDEC_VOLUME, status, value);
+    }
+
+    private void volumeUp() {
+        if (mAudioManager == null) {
+            mAudioManager = (AudioManager)mContext.getSystemService(Context.AUDIO_SERVICE);
+        }
+        int value = mAudioManager.getStreamVolume(AudioManager.STREAM_SYSTEM);
+        int status = mAudioManager.getRingerMode() == AudioManager.RINGER_MODE_NORMAL ?
+                    ASUSDEC_STATUS_ON :
+                    ASUSDEC_STATUS_OFF;
+        notifyKey(ASUSDEC_VOLUME, status, value);
+    }
+
+    private void mediaPlayPause() {
+        notifyKey(ASUSDEC_MEDIA, ASUSDEC_MEDIA_PLAY_PAUSE);
+    }
+
+    private void mediaPrevious() {
+        notifyKey(ASUSDEC_MEDIA, ASUSDEC_MEDIA_PREVIOUS);
+    }
+
+    private void mediaNext() {
+        notifyKey(ASUSDEC_MEDIA, ASUSDEC_MEDIA_NEXT);
+    }
+
+    private void capsLock(KeyEvent event) {
+        int status = event.getMetaState() == KeyEvent.META_CAPS_LOCK_ON ?
+                ASUSDEC_STATUS_ON :
+                ASUSDEC_STATUS_OFF;
+        notifyKey(ASUSDEC_CAPS_LOCK, status);
     }
 
     /*
@@ -348,6 +451,9 @@ public final class KeyHandler implements DeviceKeyHandler {
             if (mScreenshotConnection != null) {
                 return;
             }
+
+            notifyKey(ASUSDEC_SCREENSHOT, ASUSDEC_STATUS_OFF);
+
             ComponentName cn = new ComponentName("com.android.systemui",
                     "com.android.systemui.screenshot.TakeScreenshotService");
             Intent intent = new Intent();
@@ -392,6 +498,23 @@ public final class KeyHandler implements DeviceKeyHandler {
                 mHandler.postDelayed(mScreenshotTimeout, 10000);
             }
         }
+    }
+
+    private void notifyKey(int asusdeckey, int status, int value) {
+        Intent intent = new Intent();
+        intent.setAction(ACTION_DOCK_KEYPAD_KEY_PRESSED);
+        intent.putExtra(EXTRA_ASUSDEC_KEY, asusdeckey);
+        intent.putExtra(EXTRA_ASUSDEC_STATUS, status);
+        intent.putExtra(EXTRA_ASUSDEC_VALUE, value);
+        mContext.sendBroadcast(intent, PERMISSION_KEYPAD_RECEIVER);
+    }
+
+    private void notifyKey(int asusdeckey, int status) {
+        notifyKey(asusdeckey, status, 0);
+    }
+
+    private static long getMetaFunctionKeys() {
+        return SystemProperties.getLong(KeyHandler.META_FUNCTION_KEYS_PROPERTY, 0);
     }
 
     /*
